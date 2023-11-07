@@ -1,294 +1,342 @@
-# JDBC  이해
+# 커넥션 풀 이해
+---
 
-## Project Metadata
+<img width="643" alt="스크린샷 2023-11-07 11 13 48" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/22dd47d1-936e-4a3a-b21b-7c5f99dbd459">
 
-Group : hello
 
-Artifact : jdbc
+### DB Connection 획득하는 과정
 
-Name : jdbc
+1. 애플리케이션 로직은 DB 드라이버를 통해 커넥션을 조회한다.
+2. DB 드라이버는 DB와 `TCP/IP` Connection 을 연결한다. 물론 이 과정에서 3 way handshake 같은 `TCP/IP` 연결을 위한 네트워크 동작이 발생한다.
+3. DB 드라이버는 `TCP/IP` Connection 이 연결 되면 , ID, PW 와 기타 부가 정보를 DB에 전달한다.
+4. DB는 ID, PW 를 통해 내부 인증을 완료하고, 내부에 DB 세션을 생성한다.
+5. DB는 Connection 생성이 완료되었다는 응답을 보낸다.
+6. DB 드라이버는 Connection 객체를 생성해서 클라이언트에 반환한다.
 
-Package name : hello.jdbc
+이렇게 커넥션을 새로 만드는 것은 과정도 복잡하고 시간도 많이 소모되는 일이다.
 
-Packaging : Jar
+이 문제를 해결하기위한 아이디어가 바로 커넥션을 미리 생성해두고 사용하는 커넥션 풀이라는 방법이다.
 
-Java : 11
+<img width="641" alt="스크린샷 2023-11-07 11 13 53" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/485e1e87-42bc-4b15-83f9-69f81277d7ab">
 
-Dependencies : JDBC API, H2 Database, Lombok
 
-### 테스트에서도 lombok 을 사용하기 위해 코드 추가
+애플리케이션을 시작하는 시점에 커넥션 풀은 필요한 만큼 커넥션을 미리 확보해서 풀에 보관한다.
 
-`build.gradle`
+얼마나 보관할 지는 서비스의 특징과 서버 스펙에 따라 다르지만 기본값은 보통 10개 이다.
 
-```groovy
-dependencies{
+<img width="638" alt="스크린샷 2023-11-07 11 13 58" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/348aa56a-825a-4a8c-ab83-c8d7a30f9732">
 
-	...
-	
-	//테스트에서 lombok 사용
-	testCompileOnly 'org.projectlombok:lombok'
-	testAnnotationProcessor 'org.projectlombok:lombok'
 
-}
-```
+커넥션 풀에 들어 있는 커넥션은 TPC/IP 로 DB와 커넥션이 연결되어 있는 상태이기 때문에 언제든지 즉시 SQL 을 DB에 전달할 수 있다.
 
-이 설정을 사용하면 테스트코드에서 `@Slfj4` 같은 롬복 애노테이션을 사용할 수 있다.
+<img width="649" alt="스크린샷 2023-11-07 11 14 04" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/64b11032-6dbd-40cc-bd83-0ac583a19daa">
 
-## 테이블 생성하기
 
-```sql
-drop table member if exists cascade;
-create table member(
-	member_id varchar(10),
-	money integer not null default 0,
-  primary key(member_id)
-);
+애플리케이션 로직에서 이제는 DB 드라이버를 통해서 새로운 커넥션을 획득하는 것이 아니다.
 
-insert into member(member_id, money) values ('hi1',10000);
-insert into member(member_id, money) values ('hi2',20000);
-```
+이제는 커넥션 풀을 통해 이미 생성되어 있는 커넥션을 객체 참조로 그냥 가져다 쓰기만 하면 된다.
 
-# JDBC 이해
+커넥션 풀에 커넥션을 요청하면 커넥션 풀은 자신이 가지고 있는 커넥션 중 하나를 반환한다.
+
+<img width="644" alt="스크린샷 2023-11-07 11 14 11" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/f05be895-0ad4-4cbb-bdf0-439880ee2a26">
+
+
+커넥션을 모두 사용하고 나면 이제는 커넥션을 종료하는 것이 아니라, 다음에 다시 사용할 수 있도록 해당 커넥션을 그대로 커넥션 풀에 반환하면 된다.
+
+# DataSource 이해
 
 ---
 
-## 등장 이유
-
-애플리케이션을 개발할 때 중요한 데이터는 대부분 데이터베이스에 보관한다.
-
-<img width="851" alt="스크린샷 2023-11-07 09 28 46" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/5e3efad9-4028-4456-afea-563d93284c67">
+<img width="639" alt="스크린샷 2023-11-07 11 14 17" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/7a6bf5b4-1c1b-4d9d-a8f3-39b4b29d107f">
 
 
-클라이언트가 애플리케이션 서버를 통해 데이터를 저장하거나 조회하면, 애플리케이션 서버는 다음과정을 통해 DB를 사용한다.
+### DriverManager 를 통해 커넥션 획득
 
-<img width="851" alt="스크린샷 2023-11-07 09 28 50" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/528a4db1-79ab-4f10-8b12-9042367ae6d0">
-
-
-1. 커넥션 연결 : 주로 TCP / IP 를 사용해 커넥션 연결
-2. SQL 전달 : 애플리케이션 서버는 DB가 이해할 수 있는 SQL을 연결된 커넥션을 통해 DB에 전달한다.
-3. 결과 응답 : DB는 전달된 SQL을 수행하고 그 결과를 응답한다. 애플리케이션 서버는 응답 결과를 활용한다.
-
-<img width="847" alt="스크린샷 2023-11-07 09 28 56" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/681b7e64-fb1e-4e23-baef-9f0cc2ed3950">
+<img width="637" alt="스크린샷 2023-11-07 11 14 24" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/c75bf85a-5594-46b1-baaf-68de18e48b55">
 
 
-### 문제 ]
+`DriverManager` 를 통해서 커넥션을 획득하다가, 커넥션 풀을 사용하는 방법으로 변경하려면?
 
-각각의 데이터 베이스마다 커넥션을 연결하는 방법, SQL을 전달하는 방법, 그리고 결과를 응답 받는 방법은 모두 다름
-
-1. DB를 다른 종류의 DB로 변경하면 애플리케이션 서버에 개발된 데이터베이스 사용 코드도 함께 변경해야 한다.
-2. 개발자가 각각의 데이터베이스마다 커넷션 연결, SQL 전달, 그리고 그 결과를 응답 받는 방법을 새로 학습해야 한다.
-
-위 문제를 해결하기 위해 JDBC 라는 자바 표준이 등장한다.
-
-## JDBC 표준 인터페이스
-
-Java Database Connectivity 는 자바에서 데이터베이스에 접속할 수 있도록 하는 자바 API 다.
-
-JDBC는 DB 에서 자료를 쿼리하거나 업데이트 하는 방법을 제공한다.
-
-<img width="850" alt="스크린샷 2023-11-07 09 30 28" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/f0b0f256-7e86-4377-bda2-e726d1e47ccf">
-
-대표적으로 다음 3가지 기능을 표준 인터페이스로 정의해서 제공한다.
-
-- `java.sql.Connection` - 연결
-- `java.sql.Statement` - SQL을 담은 내용
-- `java.sql.ResultSet` - SQL 요청 응답
-
-자바는 표준 인터페이스를 정의해두었다.
-
-하지만 인터페이스만 있다고 해서 기능이 동작하지 않는다.
-
-이 JDBC 인터페이스를 각각의 DB 벤더 (회사) 에서 자신의 DB에 맞도록 구현해서 라이브러리로 제공하는데,
-
-이것을 JDBC 드라이버라 한다.
-
-<img width="858" alt="스크린샷 2023-11-07 09 31 12" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/f91faaa2-af58-4012-8570-5c9fe9b74a4a">
-
-<img width="849" alt="스크린샷 2023-11-07 09 31 26" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/bd77fe3a-06d2-412c-847c-31c161e2a5b6">
+<img width="635" alt="스크린샷 2023-11-07 11 14 29" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/695e1734-8f17-4738-b304-ecb46da51053">
 
 
-## JDBC 와 최신 데이터 접근 기술
+### 커넥션을 획득하는 방법을 `추상화`
 
-JDBC는 1997년에 출시될 정도로 오래된 기술이고, 사용하는 방법도 복잡하다.
+<img width="636" alt="스크린샷 2023-11-07 11 17 11" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/bb936080-f1de-4aeb-afe5-55e869a504d6">
 
-그래서 최근엔 JDBC 를 직접하용하기 보다는 JDBC 를 편리하게 사용하는 다양한 기술이 존재한다.
 
-대표적으로 SQL Mapper 와 ORM 기술로 나눌수 있다.
+자바에서는 이런 문제를 해결하기 위해 `javax.sql.DataSource` 라는 인터페이스를 제공한다.
 
-<img width="851" alt="스크린샷 2023-11-07 09 32 17" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/49bd1111-d925-47f2-befb-12926a6dc3f4">
+`DataDource` 는 커넥션을 획득하는 방법을 추상화 하는 인터페이스이다.
 
-SQL Mapper 
+이 인터페이스의 핵심 기능은 커넥션 조회 하나이다. ( 다른 일부 기능도 있지만 크게 중요하지 않음 )
 
-- [ 장점 ] : JDBC를 편리하게 사용하도록 도와준다.
-    - SQL 응답 결과를 객체로 편리하게 변환해준다.
-    - JDBC의 반복 코드를 제거해준다.
-- [ 단점 ] : 개발자가 SQL을 직접 작성해야 한다.
-- 대표기술 : 스프링 jdbcTemplate, MyBatis
-  
-<img width="848" alt="스크린샷 2023-11-07 09 33 18" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/fb08e403-77a2-4835-85e2-f243ee97320f">
-
-ORM 기술
-
-- OMR은 객체를 관계현 데이터베이스 테이블과 매핑해주는 기술이다.
-- 개발자는 반복적인 SQL을 직접 작성하지 않고, ORM 기술이 개발자 대신에 SQL을 동적으로 만들어 실행해 준다.
-- 추가로 각각의 데이터베이스마다 다른 SQL을 사용하는 문제도 중간에서 해결해준다.
-- JPA, 하이버네이트, 이클립스링크
-- JPA는 자바 진영의 ORM 표준 인터페이스이고, 이것을 구현하는 것으로 하이버네이트와 이클립스 링크등의 구현 기술이 있다.
-
-## DB 연결
-
-### ConnectionConst
+### DataSource 핵심 기능만 축약
 
 ```java
-package hello.jdbc.connection;
-
-public abstract class ConnectionConst {
-
-    public static final String URL = "jdbc:mysql://localhost/testDB?serverTimezone=UTC";
-    public static final String USERNAME = "root";
-    public static final String PASSWORD = "1234";
-
+public interface DataSource{
+	Connection getConnection() throws SQLException;
 }
 ```
 
-### DBConnectionUtil
+대부분의 커넥션 풀은 `DataSource` 인터페이스를 이미 구현해두었다. 따라서 개발자는 `DBCP2 커넥션 풀` , `HikariCP 커넥션 풀` 의 코드를 직접 의존하는 것이 아니라 `DataSource` 인터페이스에만 의존하도록 애플리케이션 로직을 작성하면 된다.
+
+커넥션 풀 구현 기술을 변경하고 싶으면 해당 구현체로 갈아끼우기만 하면 된다.
+
+`DriverManager` 는 `DataSource` 인터페이스를 사용하지 않는다. 따라서 `DriverManager` 는 직접 사용해야 한다. 따라서 `DriverManager` 를 사용하다가 `DataSource` 기반의 커넥션 풀을 사용하도록 변경하면 관련 코드를 다 고쳐야 한다. 이런 문제를 해결하기 위해 스프링은 `DriverManager` 도 `DataSource` 를 통해서 사용할 수 있도록 `DriverManageDateSource` 라는 `DataSource` 를 구현한 클래스를 제공한다.
+
+자바는 `DataSource` 를 통해 커넥션을 획득하는 방법을 추상화 했다.
+
+이제 애플리케이션 로직은 `DataSource` 인터페이스에만 의존하면 된다. 덕분에 `DriverManageDataSource` 를 통해서 `DriverManager` 를 사용하다가 커넥션 풀을 사용하도록 코드를 변경해도 애플리케이션 로직은 변경하지 않아도 된다.
+
+## DataSource 예제 1 - DriverManager
+
+### ConnectionTest - 드라이버 매니저
 
 ```java
-package hello.jdbc.connection;
+package hello.jdbc.Connection;
 
-import lombok.extern.slf4j.Slf4j;
-
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
-
-import static hello.jdbc.connection.ConnectionConst.*;
-
-@Slf4j
-public class DBConnectionUtil {
-
-    public static Connection getConnection(){
-        
-        try{
-            Connection connection = DriverManager.getConnection(URL,USERNAME,PASSWORD);
-            log.info("get Connection={}, class= {}", connection, connection.getClass());
-            return connection;    
-        }catch (SQLException e){
-            throw new IllegalStateException(e);
-        }
-        
-    }
-
-}
-```
-
-데이터베이스에 연결하려면 JDBC 가 제공하는 `DriverManager.getConnection(..)` 를 사용하면 된다.
-
-이렇게 하면 라이브러리에 있는 데이터베이스 드라이버를 찾아서 해당 드라이버가 제공하는 커넥션을 반환해준다.
-
-### DB ConnectionUtilTest
-
-```java
-package hello.jdbc.connection;
-
-import jakarta.xml.bind.annotation.XmlSeeAlso;
 import lombok.extern.slf4j.Slf4j;
 import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
-
-import static org.junit.jupiter.api.Assertions.*;
+import java.sql.SQLException;
 
 @Slf4j
 class DBConnectionUtilTest {
-    
+
     @Test
-    void connection(){
-        Connection connection = DBConnectionUtil.getConnection();
-        Assertions.assertThat(connection).isNotNull();
+    @DisplayName("커넥션 테스트")
+    void getConnectTest(){
+
+        try {
+
+            Connection con1 = DBConnectionUtil.getConnection();
+            log.info("connection = {} , imple = {}" , con1, con1.getClass());
+
+            Connection con2 = DBConnectionUtil.getConnection();
+            log.info("connection = {} , imple = {}" , con1, con1.getClass());
+
+            Assertions.assertThat(con1).isNotNull();
+            Assertions.assertThat(con2).isNotNull();
+        }catch (SQLException e){
+            log.error("error :",e);
+        }
+
     }
-    
 
 }
 ```
 
-## JDBC DriverManager 연결 이해
+<img width="945" alt="스크린샷 2023-11-07 10 11 45" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/4075dec5-b920-4e3a-8a74-5467208fa3a2">
 
-<img width="839" alt="스크린샷 2023-11-07 09 33 50" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/3b0b0bd1-725e-4c95-85a1-154aac700b1e">
 
-JDBC 는 `java.sql.Connection` 표준 커넥션인 인터페이스를 정의한다.
+### `DataSource` 가 적용된 `DriverManager` → `DriverManagerDataSource`
 
-### DriverManager 커넥션 요청 흐름
-
-<img width="849" alt="스크린샷 2023-11-07 09 33 56" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/147ab2d7-933f-4455-a2b4-36e357210ea9">
-
-JDBC가 제공하는 `DriverManager` 는 라이브러리에 등록된 DB 드라이버들을 관리하고, 커넥션을 획득하는 기능을 제공한다.
-
-1. 애플리케이션 로직에서 커넥션이 필요하면 `DriverManager.getConnection()` 을 호출한다.
-2. `DriverManager` 는 라이브러리에 등록된 드라이버 목록을 자동으로 인식한다. 이 드라이버들에게 순서대로 다음 정보를 넘겨서 커넥션을 획득할 수 있는지 확인한다.
-    1. URL : ex ) `jdbc:h2:tcp://localhost/~/test`
-    2. 이름, 비밀번호 등 접속에 필요한 추가 정보
-    3. 각각의 드라이버는 URL 정보를 체크해서 본인이 처리할 수 있는 요청인지 확인 한다.
-        
-        URL 이 `jdbc:mysql` 로 시작하면 이것은 mysql 데이터베이스에 접근하기 위한 규칙이다.
-        
-        따라서 mysql 드라이버는 본인이 처리할 수 있으므로 실제 데이터페이스에 연결해서 커넥션을 획득하고 이 커넥션을 클라이언트에 반환한다.
-        
-        반면 `jdbc:mysql` 로 시작했는데 h2 드라이버가 먼저 실행되면 본인이 처리 할 수 없다는 결과를 반환하고 다음 드라이버에게 순서가 넘어간다.
-        
-3. 이 과정을 통해 찾은 커넥션 구현체가 클라이언트에 반환된다.
-
-## JDBC 개발 - 등록
-
-### table 만들기
-
-```sql
-drop table member if exists cascade;
-    create table member (
-        member_id varchar(10),
-        money integer not null default 0,
-        primary key (member_id)
-);
-```
-
-### Member [ VO ]
+### ConnectionTest - 데이터 소스 드라이버 매니저 추가
 
 ```java
-package hello.jdbc.domain;
+package hello.jdbc.Connection;
 
-import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
-@Data
-public class Member {
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
 
-    private String memberId;
-    private int money;
+import static hello.jdbc.Connection.ConnectionConst.*;
 
-    public Member() {
+@Slf4j
+class DBConnectionUtilTest {
+
+    @Test
+    @DisplayName("커넥션 테스트")
+    void getConnectTest() throws SQLException {
+
+            Connection con1 = DBConnectionUtil.getConnection();
+            log.info("connection = {} , imple = {}" , con1, con1.getClass());
+
+            Connection con2 = DBConnectionUtil.getConnection();
+            log.info("connection = {} , imple = {}" , con1, con1.getClass());
+
+            Assertions.assertThat(con1).isNotNull();
+            Assertions.assertThat(con2).isNotNull();
+
+            DriverManagerDataSource ds = new DriverManagerDataSource(URL,USERNAME,PASSWORD);
+
+            userDataSource(ds);
     }
 
-    public Member(String memberId, int money) {
-        this.memberId = memberId;
-        this.money = money;
+    private void userDataSource(DataSource dataSource) throws SQLException {
+        Connection con1 = dataSource.getConnection();
+        Connection con2 = dataSource.getConnection();
+        log.info("connection = {} , imple = {}" , con1, con1.getClass());
+        log.info("connection = {} , imple = {}" , con2, con2.getClass());
     }
+
 }
 ```
 
-### MemberRepositoryV0 - 회원 등록
+<img width="501" alt="스크린샷 2023-11-07 10 37 40" src="https://github.com/shinywoon/Deep_Dive_Spring/assets/100909578/1f453946-31ab-432b-8d0b-c3e731fac6cd">
+
+
+`DriverManagerDataSource` 는 스프링이 제공하는 코드이다.
+
+### 차이점
+
+`DriverManager`
+
+```java
+DriverManager.getConnection(URL,USERNAME,PASSWORD);
+DriverManager.getConnection(URL,USERNAME,PASSWORD);
+```
+
+`DataSource`
+
+```java
+void dataSourceDriverManager() throws SQLException {
+      DriverManagerDataSource dataSource = new DriverManagerDataSource(URL,
+  USERNAME, PASSWORD);
+      useDataSource(dataSource);
+}
+  private void useDataSource(DataSource dataSource) throws SQLException {
+      Connection con1 = dataSource.getConnection();
+      Connection con2 = dataSource.getConnection();
+      log.info("connection={}, class={}", con1, con1.getClass());
+      log.info("connection={}, class={}", con2, con2.getClass());
+}
+```
+
+`DriverManager` 는 커넥션을 획득할 때마다, `URL`, `USERNAME`, `PASSWORD` 같은 파라미터를 계속 전달해야 한다.
+
+반면 `DataSource` 를 사용하는 방식은 처음 객체를 생성할 때만 필요한 파라미터를 넘겨두고, 커넥션을 획득할 때는 단순히 `dataSource.getConnection()` 만 호출하면 된다. ( 설정과 사용의 분리 )
+
+## DataSource 예제 2 - 커넥션 풀
+
+### ConnectionTest - 데이터소스 커넥션 풀 추가
+
+```java
+package hello.jdbc.Connection;
+
+import com.zaxxer.hikari.HikariDataSource;
+import lombok.extern.slf4j.Slf4j;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+import java.net.UnknownServiceException;
+import java.sql.Connection;
+import java.sql.SQLException;
+
+import static hello.jdbc.Connection.ConnectionConst.*;
+
+@Slf4j
+class DBConnectionUtilTest1 {
+
+    @Test
+    @DisplayName("커넥션 테스트")
+    void getConnectTest() throws SQLException, InterruptedException {
+
+        HikariDataSource dataSource = new HikariDataSource();
+        dataSource.setJdbcUrl(URL);
+        dataSource.setUsername(USERNAME);
+        dataSource.setPassword(PASSWORD);
+        dataSource.setMaximumPoolSize(10);
+        dataSource.setPoolName("MyPool");
+
+        useDataSource(dataSource);
+
+        Thread.sleep(1000);
+
+    }
+
+    private void useDataSource(DataSource dataSource) throws SQLException {
+        Connection con1 = dataSource.getConnection();
+        Connection con2 = dataSource.getConnection();
+        log.info("connection = {} , imple = {}" , con1, con1.getClass());
+        log.info("connection = {} , imple = {}" , con2, con2.getClass());
+    }
+
+}
+```
+
+HikariCP Connection Pool 사용
+
+`HikariDataSource` 는 `DataSource` interface 를 구현
+
+ `dataSource.setMaximumPoolSize(10);` : Connection Pool 최대 Size 지정
+
+`dataSource.setPoolName("MyPool");` : Pool Name 설정
+
+### 실행 결과
+
+(로그 순서는 이해하기 쉽게 약간 수정)
+
+```java
+#커넥션 풀 초기화 정보 출력
+HikariConfig - MyPool - configuration:
+HikariConfig - maximumPoolSize................................10 HikariConfig - poolName................................"MyPool"
+#커넥션 풀 전용 쓰레드가 커넥션 풀에 커넥션을 10개 채움
+[MyPool connection adder] MyPool - Added connection conn0: url=jdbc:h2:.. user=SA
+[MyPool connection adder] MyPool - Added connection conn1: url=jdbc:h2:.. user=SA
+[MyPool connection adder] MyPool - Added connection conn2: url=jdbc:h2:.. user=SA
+[MyPool connection adder] MyPool - Added connection conn3: url=jdbc:h2:.. user=SA
+[MyPool connection adder] MyPool - Added connection conn4: url=jdbc:h2:.. user=SA
+ ...
+[MyPool connection adder] MyPool - Added connection conn9: url=jdbc:h2:.. user=SA
+
+#커넥션 풀에서 커넥션 획득1
+ConnectionTest - connection=HikariProxyConnection@446445803 wrapping conn0: url=jdbc:h2:tcp://localhost/~/test user=SA, class=class com.zaxxer.hikari.pool.HikariProxyConnection
+
+#커넥션 풀에서 커넥션 획득2
+ConnectionTest - connection=HikariProxyConnection@832292933 wrapping conn1: url=jdbc:h2:tcp://localhost/~/test user=SA, class=class com.zaxxer.hikari.pool.HikariProxyConnection
+MyPool - After adding stats (total=10, active=2, idle=8, waiting=0)
+```
+
+### MyPool Connection adder
+
+별도의 쓰레드를 사용해 커넥션을 채운다.
+
+왜 별도의 쓰레드를 사용해 커넥션을 채울까?
+
+커넥션 풀에 커넥션을 채우는 것은 상대적으로 오래 걸리는 일
+
+다 채울때 까지 기다리면 Application 실행시간이 늦어진다.
+
+## DataSource 적용
+
+### MemberRepositoryV1
 
 ```java
 package hello.jdbc.repository;
 
-import hello.jdbc.connection.DBConnectionUtil;
+import hello.jdbc.Connection.DBConnectionUtil;
 import hello.jdbc.domain.Member;
+import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.support.JdbcUtils;
 
-import javax.xml.transform.Result;
+import javax.sql.DataSource;
 import java.sql.*;
+import java.util.NoSuchElementException;
 
 @Slf4j
-public class MemberRepositoryV0 {
+public class MemberRepositoryV1 {
+
+    private final DataSource dataSource;
+
+    public MemberRepositoryV1(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
 
     public Member save(Member member) throws SQLException {
 
@@ -297,17 +345,18 @@ public class MemberRepositoryV0 {
         Connection con = null;
         PreparedStatement pstmt = null;
 
-        try{
+        try {
 
             con = DBConnectionUtil.getConnection();
             pstmt = con.prepareStatement(sql);
             pstmt.setString(1,member.getMemberId());
-            pstmt.setInt(2,member.getMoney());
+            pstmt.setInt(2, member.getMoney());
             pstmt.executeUpdate();
+
             return member;
 
         }catch (SQLException e){
-            log.error("db error",e);
+            log.error("err : ", e);
             throw e;
         }finally {
             close(con,pstmt,null);
@@ -315,86 +364,19 @@ public class MemberRepositoryV0 {
 
     }
 
-    private void close(Connection con, Statement stmt, ResultSet rs) throws SQLException {
-        if (rs != null){
-            try {
-                rs.close();
-            }catch (SQLException e){
-                log.info("error",e);
-            }
-        }
+    public Member findById(String memberId) throws SQLException {
 
-        if (stmt != null){
-          try {
-              stmt.close();
-          }catch (SQLException e){
-              log.info("error",e);
-          }
-        }
-
-        if (con != null){
-            try {
-                con.close();
-            }catch (SQLException e){
-                log.info("error",e);
-            }
-        }
-
-    }
-
-}
-```
-
-### 커넥션 획득
-
-`getConnection()` : `DBConnectionUtil` 를 통해서 데이터베이스 커넥션을 획득한다.
-
-### MemberRepositoryV0Test - 회원 등록
-
-```java
-package hello.jdbc.repository;
-
-import hello.jdbc.domain.Member;
-import org.junit.jupiter.api.Test;
-
-import java.sql.SQLException;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-class MemberRepositoryV0Test {
-
-    MemberRepositoryV0 repository = new MemberRepositoryV0();
-
-    @Test
-    void crud() throws SQLException {
-        Member member = new Member("memberV0",10000);
-        repository.save(member);
-    }
-
-}
-```
-
-`select * from member` 쿼리를 실행하면 데이터가 저장된 것을 확인 할 수 있다.
-
-## JDBC 개발 - 조회
-
-### MemberRepositoryV0 - 회원 조회 추가
-
-```java
-public Member findById(String memberId) throws SQLException {
-
-        String sql = "select * from member where member_id = ?";
+        String sql = "select * from member where member_id=?";
 
         Connection con = null;
         PreparedStatement pstmt = null;
         ResultSet rs = null;
 
-        try{
+        try {
 
-            con = DBConnectionUtil.getConnection();
+            con = getConnection();
             pstmt = con.prepareStatement(sql);
             pstmt.setString(1,memberId);
-
             rs = pstmt.executeQuery();
 
             if (rs.next()){
@@ -403,189 +385,154 @@ public Member findById(String memberId) throws SQLException {
                 member.setMoney(rs.getInt("money"));
                 return member;
             }else {
-                throw new NoSuchElementException("member not found memberId ="+memberId);
+                throw new NoSuchElementException("member not found member_id = " + memberId);
             }
 
         }catch (SQLException e){
-            log.error("db error",e);
+            log.error("err : ",e);
             throw e;
         }finally {
             close(con,pstmt,rs);
         }
 
     }
-```
 
-### findById() - 쿼리 실행
+    public void update(String memberId, int money) throws SQLException {
 
-`sql`: 데이터 조회를 위한 select SQL을 준비한다.
-
-데이터를 조회할때는 `executeQuery()` 를 사용한다. 결과를 `ResultSet` 에 담아서 반환한다.
-
-### MemeberRepositoryV0Test - 회원 조회 추가
-
-```java
-package hello.jdbc.repository;
-
-import hello.jdbc.domain.Member;
-import lombok.extern.slf4j.Slf4j;
-import org.assertj.core.api.Assertions;
-import org.junit.jupiter.api.Test;
-
-import java.sql.SQLException;
-
-import static org.assertj.core.api.Assertions.*;
-import static org.junit.jupiter.api.Assertions.*;
-@Slf4j
-class MemberRepositoryV0Test {
-
-    MemberRepositoryV0 repository = new MemberRepositoryV0();
-
-    @Test
-    void crud() throws SQLException {
-    
-        // save
-        Member member = new Member("memberV0",10000);
-        repository.save(member);
-    
-        //findById
-        Member findMember = repository.findById(member.getMemberId());
-        log.info("findMember={}",findMember);
-        assertThat(findMember).isEqualTo(member);
-        
-    }
-}
-```
-
-실행 시 정상 저장된 결과를 잘 조회한다.
-
-> 참고 : 실행결과에 `member` 객체의 참조 값이 아니라 실제 데이터가 보이는 이유는 롬복의 `@Data` 가 `toString()` 을 적절히 오버라이딩 해서 보여주기 때문이다.
-`isEqualTo()`: `findMember.equals(member)` 를 비교한다. 결과가 참인 이유는 롬복의 `@Data` 는 해당 객체의 모든 필드를 사용하도록 `equals()` 를 오버라이딩 하기 때문이다.
-> 
-
-## JDBC 개발 - 수정 , 삭제
-
-### MemberRepositoryV0 - 회원 수정 추가
-
-```java
-public void update(String memberId, int money) throws SQLException {
-        
         String sql = "update member set money=? where member_id=?";
-        
+
         Connection con = null;
         PreparedStatement pstmt = null;
-        
+
         try {
-            
-            con = pstmt.getConnection();
+
+            con =getConnection();
             pstmt = con.prepareStatement(sql);
             pstmt.setInt(1,money);
             pstmt.setString(2,memberId);
-            int resultSize = pstmt.executeUpdate();
-            log.info("resultSize={}",resultSize);
-            
+            pstmt.executeUpdate();
+
         }catch (SQLException e){
-            log.error("db error",e);
+            log.error("err : " ,e);
             throw e;
         }finally {
             close(con,pstmt,null);
         }
-        
+
     }
-```
 
-### MemberRepositoryV0Test - 회원 수정 추가
-
-```java
-@Test
-    void crud() throws SQLException {
-
-        // save
-        Member member = new Member("memberV0",10000);
-        repository.save(member);
-
-        //findById
-        Member findMember = repository.findById(member.getMemberId());
-        log.info("findMember={}",findMember);
-        assertThat(findMember).isEqualTo(member);
-
-        //update : money 10000 -> 20000
-        repository.update(member.getMemberId(),20000);
-        Member updateMember = repository.findById(member.getMemberId());
-        assertThat(updateMember.getMoney()).isEqualTo(20000);
-        
-    }
-```
-
-### MemberRepositoryV0 - 회원 삭제 추가
-
-```java
-public void delete(String memberId) throws SQLException {
+    public void delete(String memberId) throws SQLException {
 
         String sql = "delete from member where member_id=?";
 
         Connection con = null;
         PreparedStatement pstmt = null;
 
-        try{
+        try {
 
-            con = DBConnectionUtil.getConnection();
+            con = getConnection();
             pstmt = con.prepareStatement(sql);
             pstmt.setString(1,memberId);
-
             pstmt.executeUpdate();
 
         }catch (SQLException e){
-            log.error("db error",e);
+            log.error("err :", e);
             throw e;
-        }finally{
+        }finally {
             close(con,pstmt,null);
         }
 
     }
+
+    private void close(Connection con, Statement stmt, ResultSet rs) throws SQLException {
+        JdbcUtils.closeResultSet(rs);
+        JdbcUtils.closeStatement(stmt);
+        JdbcUtils.closeConnection(con);
+    }
+
+    private Connection getConnection() throws SQLException {
+        Connection con = dataSource.getConnection();
+        log.info("get connection ={} , class={}", con, con.getClass());
+        return con;
+    }
+
+}
 ```
 
-### MemberRepositoryV0Test - 회원 삭제 추가
+`DataSource` 의존 관계 주입
+
+- 외부에서 `DataSource` 를 주입 받아서 사용
+- `DataSource` 는 표준 인터페이스 이기 때문에 `DriverManagerDataSource` 에서 `HikariDataSource` 로 변경 되어도 해당 코드를 변경하지 않아도 된다.
+
+`JdbcUtils` 편의 메서드
+
+- 스프링은 JDBC 를 편리하게 다룰 수 있는 `JdbcUtils` 를 제공
+
+### MemberRepositoryV1Test
 
 ```java
 package hello.jdbc.repository;
 
+import com.zaxxer.hikari.HikariDataSource;
+import hello.jdbc.Connection.ConnectionConst;
 import hello.jdbc.domain.Member;
 import lombok.extern.slf4j.Slf4j;
-import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.sql.SQLException;
 import java.util.NoSuchElementException;
 
-import static org.assertj.core.api.Assertions.*;
-import static org.junit.jupiter.api.Assertions.*;
-@Slf4j
-class MemberRepositoryV0Test {
+import static hello.jdbc.Connection.ConnectionConst.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-    MemberRepositoryV0 repository = new MemberRepositoryV0();
+@Slf4j
+class MemberRepositoryV1Test {
+
+    MemberRepositoryV1 repository;
+
+    @BeforeEach
+    void beforeEach(){
+
+        //DriverManagerDataSource ds = new DriverManagerDataSource(URL,USERNAME,PASSWORD);
+
+        HikariDataSource ds = new HikariDataSource();
+        ds.setJdbcUrl(URL);
+        ds.setUsername(USERNAME);
+        ds.setPassword(PASSWORD);
+
+        repository = new MemberRepositoryV1(ds);
+
+    }
 
     @Test
+    @DisplayName("crud")
     void crud() throws SQLException {
-
-        // save
-        Member member = new Member("memberV0",10000);
-        repository.save(member);
+        //save
+        Member member = new Member("shin",10000);
+        Member saveMember = repository.save(member);
 
         //findById
-        Member findMember = repository.findById(member.getMemberId());
-        log.info("findMember={}",findMember);
-        assertThat(findMember).isEqualTo(member);
+        Member byId = repository.findById(member.getMemberId());
+        assertThat(byId).isEqualTo(member);
 
-        //update : money 10000 -> 20000
-        repository.update(member.getMemberId(),20000);
-        Member updateMember = repository.findById(member.getMemberId());
-        assertThat(updateMember.getMoney()).isEqualTo(20000);
+        //update
+        repository.update(member.getMemberId(), 20000);
+        Member byId1 = repository.findById(member.getMemberId());
+        assertThat(byId1.getMoney()).isEqualTo(20000);
 
-        //delete
+        //delect
         repository.delete(member.getMemberId());
         assertThatThrownBy(()-> repository.findById(member.getMemberId())).isInstanceOf(NoSuchElementException.class);
-
     }
 }
 ```
+
+`DataSource` 의존 관계 주입이 필요하다.
+
+DriverManagerDataSource HikariDataSource 로 변경해도 MemberRepositoryV1 의 코드는 전혀 변경하지 않아도 된다. MemberRepositoryV1 는 DataSource 인터페이스에만 의존하기 때문이다. 
+
+이것이 DataSource 를 사용하는 장점이다.(DI + OCP)
